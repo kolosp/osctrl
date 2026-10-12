@@ -44,6 +44,18 @@ class ActionExecutor:
         self.screen_width = width
         self.screen_height = height
 
+    def sync_screen_size(self) -> None:
+        """Map coordinates in pyautogui's own space (handles DPI scaling).
+
+        pyautogui interprets the pixel coordinates we pass in *its* coordinate
+        space, which can differ from the raw capture size on Windows when the
+        display is scaled. Scaling normalized coordinates by pyautogui's size is
+        therefore the correct, resolution-independent mapping.
+        """
+        if self.dry_run:
+            return
+        self.screen_width, self.screen_height = _pyautogui().size()
+
     def _px(self, x: float, y: float) -> tuple[int, int]:
         px = int(round(float(x) / SCALE * self.screen_width))
         py = int(round(float(y) / SCALE * self.screen_height))

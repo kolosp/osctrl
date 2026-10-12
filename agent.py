@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from pathlib import Path
 
 from actions import ActionExecutor
 from screenshot import capture_screenshot
@@ -29,8 +30,14 @@ Available actions (x/y are normalized 0..1000; 0,0 = top-left, 1000,1000 = botto
 - {"action": "wait", "seconds": <number>}                            pause briefly
 - {"action": "done", "message": "<summary>"}                         goal achieved; stop now
 
-Only use "done" once the goal is fully achieved. Otherwise keep issuing the
-single next concrete action that moves toward the goal.
+Rules:
+- Only use "done" once the goal is fully achieved.
+- Do NOT issue "wait" two steps in a row. Only wait if you are confident the
+  screen is loading and will change on its own.
+- If your previous action did not change the screen, do something different:
+  click another element, move the mouse elsewhere, use a keyboard shortcut, or
+  scroll. Never repeat an action that had no effect.
+- Prefer keyboard shortcuts over pixel-perfect clicking when possible.
 """
 
 
@@ -88,25 +95,70 @@ def extract_action(text: str) -> dict | None:
 
 
 class Agent:
-    def __init__(self, model, dry_run: bool = False, max_steps: int = 25, delay: float = 1.0):
+    def __init__(
+        self,
+        model,
+        dry_run: bool = False,
+        max_steps: int = 25,
+        delay: float = 1.0,
+        max_repeats: int = 3,
+        save_dir: str | Path | None = None,
+    ):
         self.model = model
         self.executor = ActionExecutor(dry_run=dry_run)
         self.max_steps = max_steps
         self.delay = delay
+        self.max_repeats = max_repeats
+        self.save_dir = Path(save_dir) if save_dir else None
         self.history: list[dict] = []
+
+    def _save(self, step: int, png_bytes: bytes) -> None:
+        if not self.save_dir:
+            return
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        (self.save_dir / f"step_{step:03d}.png").write_bytes(png_bytes)
 
     def run(self, goal: str) -> int:
         model_name = getattr(self.model, "model", "unknown")
+        live = not self.executor.dry_run
         print(f"Goal : {goal}")
         print(f"Model: {model_name}")
         print(f"Mode : {'dry-run' if self.executor.dry_run else 'live'}")
+        if self.save_dir:
+            print(f"Debug: saving screenshots to {self.save_dir}")
         print()
 
+        if live:
+            # Use pyautogui's own coordinate space for mapping (fixes Windows
+            # display-scaling mismatches between capture and input).
+            try:
+                self.executor.sync_screen_size()
+                print(
+                    f"Screen: {self.executor.screen_width}x{self.executor.screen_height} "
+                    "(pyautogui coordinates)"
+                )
+            except Exception as exc:
+                print(f"Warning: could not query screen size: {exc}", file=sys.stderr)
+
         feedback = ""
+        repeat_signature: str | None = None
+        repeat_count = 0
+        consecutive_waits = 0
 
         for step in range(1, self.max_steps + 1):
             png_bytes, width, height = capture_screenshot()
-            self.executor.set_screen_size(width, height)
+            self._save(step, png_bytes)
+
+            if live:
+                self.executor.sync_screen_size()
+            else:
+                self.executor.set_screen_size(width, height)
+
+            if len(png_bytes) < 10_000:
+                print(
+                    f"  warning: screenshot is only {len(png_bytes)} bytes — it may be "
+                    "blank/black (capture failed or the window is GPU-protected)."
+                )
 
             if step == 1:
                 instruction = (
@@ -115,10 +167,13 @@ class Agent:
                     "Here is the current screen. Decide the next action."
                 )
             else:
-                instruction = (
-                    f"Result of your last action: {feedback}\n"
-                    "Here is the current screen. Decide the next action."
-                )
+                instruction = f"Result of your last action: {feedback}\n"
+                if consecutive_waits >= 2 or repeat_count >= 2:
+                    instruction += (
+                        "WARNING: your last actions were repeated with no visible progress. "
+                        "Do NOT repeat the same action — take a different action now.\n"
+                    )
+                instruction += "Here is the current screen. Decide the next action."
 
             self.history.append({"role": "user", "image": png_bytes, "text": instruction})
 
@@ -144,6 +199,12 @@ class Agent:
             name = str(action.get("action", "")).strip().lower()
             print(f"  action: {json.dumps(action)}")
 
+            # Track stalls so a "wait forever" / no-op loop cannot run unchecked.
+            signature = json.dumps(action, sort_keys=True)
+            repeat_count = repeat_count + 1 if signature == repeat_signature else 1
+            repeat_signature = signature
+            consecutive_waits = consecutive_waits + 1 if name == "wait" else 0
+
             try:
                 feedback = self.executor.execute(action)
             except Exception as exc:
@@ -153,6 +214,22 @@ class Agent:
             if name == "done":
                 print(f"\nDone: {action.get('message', '')}")
                 return 0
+
+            if consecutive_waits >= self.max_repeats:
+                print(
+                    f"\nStopped: the model waited {consecutive_waits} times in a row with no "
+                    "progress. Actions are probably not taking effect — check display "
+                    "scaling/DPI, that the target window has focus, and that the agent is "
+                    "running at the same privilege level as the app."
+                )
+                return 3
+
+            if repeat_count >= self.max_repeats:
+                print(
+                    f"\nStopped: the model repeated the same action {repeat_count} times "
+                    f"({signature}) with no progress."
+                )
+                return 3
 
             if self.delay > 0:
                 time.sleep(self.delay)

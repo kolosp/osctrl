@@ -101,6 +101,27 @@ Run the headless smoke test (no display or API key needed):
 uv run python tests/smoke_test.py
 ```
 
+## Troubleshooting
+
+**The model only replies with `wait` and never makes progress.** This almost
+always means actions aren't taking effect, so the screen never changes and the
+model keeps waiting. Check, in order:
+
+1. **Windows display scaling / DPI.** At 125%/150% scaling the capture size and
+   the input coordinate space differ, so clicks land in the wrong place. osctrl
+   now enables per-monitor DPI awareness and maps coordinates in pyautogui's own
+   space, but verify with the debug screenshots below.
+2. **See what the model sees:** run with `--save-screenshots shots/` and open the
+   PNGs. If they are black/blank, capture is failing (or the window is
+   GPU-protected).
+3. **Focus and elevation.** Focus the target window during the 3-second
+   countdown. Input cannot reach elevated ("Run as administrator") apps unless
+   osctrl is also run elevated.
+4. **Repetition guard.** `--max-repeats N` (default 3) stops the run when the
+   same action — or a chain of waits — repeats, instead of looping forever.
+
+Screenshots are downscaled to at most 1600px before being sent to the model.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

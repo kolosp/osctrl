@@ -14,6 +14,7 @@ import time
 from agent import Agent
 from config import load_api_key, load_model
 from model import GeminiModel, MockModel
+from screenshot import enable_dpi_awareness
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,11 +31,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--demo", action="store_true", help="Use a scripted mock model instead of Gemini (no API key needed).")
     p.add_argument("--live", action="store_true", help="Execute for real even in --demo mode (use with caution).")
     p.add_argument("--immediate", action="store_true", help="Skip the startup countdown.")
+    p.add_argument("--save-screenshots", metavar="DIR", help="Save each step's screenshot to DIR for debugging.")
+    p.add_argument("--max-repeats", type=int, default=3, help="Stop after the model repeats the same action this many times.")
     return p
 
 
 def main() -> int:
     args = build_parser().parse_args()
+
+    # Must happen before any screenshot/input so mss and pyautogui agree on
+    # pixel coordinates under Windows display scaling.
+    enable_dpi_awareness()
 
     goal = args.goal
     if goal is None:
@@ -78,7 +85,14 @@ def main() -> int:
             return 130
         print("Go!\n")
 
-    agent = Agent(model=model, dry_run=dry_run, max_steps=args.max_steps, delay=args.delay)
+    agent = Agent(
+        model=model,
+        dry_run=dry_run,
+        max_steps=args.max_steps,
+        delay=args.delay,
+        max_repeats=args.max_repeats,
+        save_dir=args.save_screenshots,
+    )
     try:
         return agent.run(goal)
     except KeyboardInterrupt:
